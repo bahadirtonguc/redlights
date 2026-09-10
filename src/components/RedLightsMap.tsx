@@ -19,6 +19,14 @@ const POLL_MS = 5000;
 // after load so it reads as an artwork, not a basemap.
 const STYLE_URL = "https://basemaps.cartocdn.com/gl/dark-matter-gl-style/style.json";
 
+// Turbopack doesn't emit maplibre-gl's worker chunk at the relative path it
+// resolves via import.meta.url, so the module-worker fetch 404s (silently,
+// as Next's HTML fallback) and the map never initializes. Point it at a
+// static copy in /public instead — see public/maplibre-gl-worker.mjs.
+if (typeof window !== "undefined") {
+  maplibregl.setWorkerUrl("/maplibre-gl-worker.mjs");
+}
+
 type LiveFeature = NormalizedSignal & { fadingOut?: boolean };
 
 function muteBaseStyle(map: MLMap) {
@@ -105,7 +113,13 @@ export function RedLightsMap() {
       touchPitch: false,
     });
 
+    // Belt-and-suspenders: keep the canvas in sync with the container across
+    // any future layout changes (viewport resize, mobile chrome show/hide).
+    const resizeObserver = new ResizeObserver(() => map.resize());
+    resizeObserver.observe(containerRef.current);
+
     map.on("load", () => {
+      map.resize();
       muteBaseStyle(map);
 
       map.addSource("signals", {
@@ -159,6 +173,7 @@ export function RedLightsMap() {
 
     mapRef.current = map;
     return () => {
+      resizeObserver.disconnect();
       map.remove();
       mapRef.current = null;
     };
@@ -263,7 +278,11 @@ export function RedLightsMap() {
 
   return (
     <div className="relative h-dvh w-full overflow-hidden bg-black">
-      <div ref={containerRef} className="absolute inset-0" />
+      <div
+        ref={containerRef}
+        className="absolute inset-0"
+        style={{ position: "absolute", inset: 0 }}
+      />
 
       {/* branding */}
       <div className="pointer-events-none absolute inset-x-0 top-0 flex flex-col items-center pt-8 text-center">
