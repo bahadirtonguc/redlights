@@ -1,5 +1,5 @@
-import { RedLightsMap } from "@/components/RedLightsMap";
+import { TrafficLightsMap } from "@/components/TrafficLightsMap";
 
 export default function Home() {
-  return <RedLightsMap />;
+  return <TrafficLightsMap />;
 }
