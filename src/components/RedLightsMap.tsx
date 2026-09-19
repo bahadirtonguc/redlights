@@ -4,7 +4,7 @@ import { useEffect, useRef, useState } from "react";
 import * as maplibregl from "maplibre-gl";
 import type { Map as MLMap, MapGeoJSONFeature } from "maplibre-gl";
 import { useDispatch, useSelector } from "react-redux";
-import { useLiveSignals } from "@/lib/live/useLiveSignals";
+import { useLiveSignals, type Receipt } from "@/lib/live/useLiveSignals";
 import { SignalFader } from "@/lib/map/SignalFader";
 import { selectSignal, clearSelection } from "@/store/uiSlice";
 import type { RootState } from "@/store/store";
@@ -60,7 +60,7 @@ export function RedLightsMap() {
   const selectedSignalId = useSelector((s: RootState) => s.ui.selectedSignalId);
   const mode = useSelector((s: RootState) => s.ui.mode);
 
-  const { geometry, states, snapshot, failing } = useLiveSignals("hamburg");
+  const { geometry, states, snapshot, receipt, failing } = useLiveSignals("hamburg");
 
   const [ready, setReady] = useState(false);
 
@@ -222,7 +222,7 @@ export function RedLightsMap() {
         <p className="mt-2 text-[10px] font-light tracking-[0.3em] text-white/40">
           Parallel Lives
         </p>
-        <LiveStatus snapshot={snapshot} reds={redCount} />
+        <LiveStatus snapshot={snapshot} receipt={receipt} reds={redCount} />
       </div>
 
       <div className="pointer-events-none absolute bottom-6 left-6 text-[10px] font-light tracking-[0.25em] text-white/30">
@@ -300,9 +300,9 @@ function AboutButton() {
 }
 
 function useNow(intervalMs: number): number {
-  const [now, setNow] = useState(() => Date.now());
+  const [now, setNow] = useState(() => performance.now());
   useEffect(() => {
-    const t = setInterval(() => setNow(Date.now()), intervalMs);
+    const t = setInterval(() => setNow(performance.now()), intervalMs);
     return () => clearInterval(t);
   }, [intervalMs]);
   return now;
@@ -310,11 +310,19 @@ function useNow(intervalMs: number): number {
 
 // Small, quiet counts + "updated N s ago". Kept in its own component so its
 // once-a-second tick doesn't re-render the map component.
-function LiveStatus({ snapshot, reds }: { snapshot: StatesSnapshot | null; reds: number }) {
+function LiveStatus({
+  snapshot,
+  receipt,
+  reds,
+}: {
+  snapshot: StatesSnapshot | null;
+  receipt: Receipt | null;
+  reds: number;
+}) {
   const now = useNow(1000);
-  if (!snapshot) return null;
+  if (!snapshot || !receipt) return null;
 
-  const age = Math.max(0, Math.round((now - Date.parse(snapshot.generatedAt)) / 1000));
+  const age = Math.max(0, Math.round((receipt.ageMs + now - receipt.at) / 1000));
   const stale = age > STALE_WARN_S;
 
   return (
