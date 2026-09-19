@@ -9,11 +9,10 @@
 import { haversineMeters, type LonLat } from "@/lib/geo/haversine";
 import type { NormalizedSignal } from "@/lib/model/types";
 
-// Effectively "all of them" for a bbox this size (a few hundred signals at
-// most), so the route strings together every currently-green light instead
-// of just the ones nearest the center. Still capped so the O(n^2)
-// nearest-neighbor walk can't blow up if the bbox ever grows.
-const MAX_ROUTE_STOPS = 1000;
+// Keeps the route a coherent path through one part of the city, and keeps
+// the O(n^2) nearest-neighbor walk cheap, regardless of how many signals in
+// the bbox happen to be green at once.
+const MAX_ROUTE_STOPS = 60;
 
 export interface GreenRoute {
   stops: NormalizedSignal[];
