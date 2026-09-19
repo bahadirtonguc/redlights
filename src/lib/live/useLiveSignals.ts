@@ -4,7 +4,7 @@ import { useEffect, useMemo, useState } from "react";
 import type { GeometrySnapshot, LiveState, StatesSnapshot } from "@/lib/model/types";
 
 export const POLL_MS = 4000; // 3–5 s: the CDN copy is fresh for 3 s
-const BACKOFF_MAX_MS = 60_000;
+const BACKOFF_MAX_MS = 30_000;
 
 // Exponential backoff with a little jitter, capped.
 function backoffMs(failures: number): number {
