@@ -134,7 +134,7 @@ async function loadStates(): Promise<StatesSnapshot> {
   );
 
   const signals: StateTuple[] = [];
-  const excluded = { offline: 0, other: 0 };
+  const excluded = { offline: 0, notRedGreen: 0 };
   const seen = new Set<number>();
 
   for (const ds of results.flat()) {
@@ -142,7 +142,8 @@ async function loadStates(): Promise<StatesSnapshot> {
     seen.add(id);
     const n = normalizeObservation(ds.Observations?.[0], nowMs, maxAgeSeconds * 1000);
     if (n.kind === "live") signals.push([id, n.state, n.updatedAt]);
-    else excluded[n.kind] += 1;
+    else if (n.kind === "other") excluded.notRedGreen += 1;
+    else excluded.offline += 1;
   }
   // Ids the feed didn't return at all count as offline too.
   excluded.offline += ids.length - seen.size;

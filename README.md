@@ -95,7 +95,7 @@ endpoints; both use compact tuple arrays and are joined by `id` on the client.
   for 6 h; CDN `s-maxage=21600`.
 - `GET /api/signals?city=hamburg` — `signals: [id, "r" | "g", updatedAt][]`
   (`updatedAt` = epoch seconds), plus `generatedAt`, `total`, `live`,
-  `excluded: { offline, other }`. Cached at the CDN for 3 s
+  `excluded: { offline, notRedGreen }`. Cached at the CDN for 3 s
   (`s-maxage=3, stale-while-revalidate=10`) so every client shares one upstream
   round; concurrent requests inside one instance also share a single in-flight
   call.

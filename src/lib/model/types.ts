@@ -42,7 +42,7 @@ export interface StatesSnapshot {
   live: number; // === signals.length
   excluded: {
     offline: number; // no observation / invalid timestamp / too old
-    other: number; // dark, amber, amber-flashing, unknown
+    notRedGreen: number; // dark, amber, amber-flashing, unknown
   };
   signals: StateTuple[];
 }
