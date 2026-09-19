@@ -1,8 +1,6 @@
-# HAMBURG — GREEN ROUTE
+# RED LIGHTS — Parallel Lives
 
-A live map of Hamburg's traffic lights, with a route drawn through the ones
-currently showing **green** — recomputed on every poll, so as lights flip
-the route reshapes in real time.
+A live portrait of Hamburg, told only through its real red traffic lights.
 
 ## The data (verified, not simulated)
 
@@ -26,9 +24,18 @@ state:
 4 = red-amber, 5 = amber-flashing, 6 = green-flashing, 9 = unknown
 ```
 
-The feed is citywide (~20,000 primary-signal datastreams); this app filters
-to a central Hamburg bounding box (Altstadt / St. Pauli / Sternschanze /
-Speicherstadt / Altona-Ost) to keep polling fast and the map legible.
+This was queried and confirmed live during development — e.g. Datastream 15
+("Primary signal heads at 353_12") returned `result: 1` (red) at
+`2026-09-10T19:20:15Z`, seconds before the request was made. The feed is
+citywide (~4,000 primary-signal datastreams); this app filters to a central
+Hamburg bounding box (Altstadt / St. Pauli / Sternschanze / Speicherstadt /
+Altona-Ost) so the piece reads as an intimate portrait rather than a
+traffic-management console.
+
+Only `red`/`red-amber` states ever render. Everything else (`green`, `amber`,
+`dark`, `unknown`) is treated as "not currently red" and stays invisible —
+per the brief, there is no dashboard for every signal state, only for the
+ones that are stopped.
 
 **No state is ever fabricated.** If the upstream feed is unreachable, the
 `/api/signals` route returns an HTTP 502 with an error payload — it never
@@ -40,33 +47,14 @@ slow, so the browser never talks to Hamburg directly: a server-side adapter
 only the normalized data the frontend needs, cached for 4 seconds to protect
 the upstream feed from being hammered by concurrent clients.
 
-## The "green route"
-
-There is no public routing graph over traffic-signal nodes, so the route is
-a geometric heuristic, not an official navigation route:
-
-1. Take every signal currently `green` inside the bbox.
-2. Keep the up-to-60 nearest to the city center (`buildGreenRoute`, in
-   `src/lib/route/buildGreenRoute.ts`), so the line stays one coherent path
-   instead of zig-zagging across the whole city.
-3. Walk them in nearest-neighbor order, starting from the one closest to
-   the center — a classic greedy TSP heuristic using haversine distance
-   (`src/lib/geo/haversine.ts`).
-
-This is recomputed from scratch on every poll (every 5s), so the line
-visibly redraws itself as signals change from green to red and back.
-
 ## Architecture
 
 ```
-src/lib/model/types.ts            — city-agnostic NormalizedSignal + CityAdapter contract
-src/lib/adapters/hamburg/         — Hamburg-specific SensorThings client + adapter
-src/lib/geo/haversine.ts          — great-circle distance helper
-src/lib/route/buildGreenRoute.ts  — nearest-neighbor route through currently-green signals
-src/app/api/signals/route.ts      — server-side proxy; picks an adapter by ?city=
-src/store/                        — Redux Toolkit store + RTK Query (polling every 5s)
-src/components/TrafficLightsMap.tsx — MapLibre dark map: red context dots, green
-                                       signals, the live route line, and click-to-inspect
+src/lib/model/types.ts          — city-agnostic NormalizedSignal + CityAdapter contract
+src/lib/adapters/hamburg/       — Hamburg-specific SensorThings client + adapter
+src/app/api/signals/route.ts    — server-side proxy; picks an adapter by ?city=
+src/store/                      — Redux Toolkit store + RTK Query (polling every 5s)
+src/components/RedLightsMap.tsx — MapLibre dark map, glow animation, interactions, branding
 ```
 
 Normalized shape (`NormalizedSignal`), identical regardless of city:
@@ -79,15 +67,6 @@ Adding a second city later is: implement `CityAdapter.getSnapshot()` for it
 and register it in `ADAPTERS` in `src/app/api/signals/route.ts`. Nothing in
 the map, store, or UI layer references Hamburg by name.
 
-## State management (RTK)
-
-- `src/store/store.ts` — Redux Toolkit `configureStore`.
-- `src/store/signalsApi.ts` — RTK Query `createApi` endpoint (`useGetSignalsQuery`)
-  that polls `/api/signals` every 5 seconds; each response drives the map and
-  the route recomputation.
-- `src/store/uiSlice.ts` — plain RTK slice for UI-only state (the selected
-  signal's info popup, the about dialog).
-
 ## Running it
 
 ```bash
@@ -95,14 +74,16 @@ npm install
 npm run dev
 ```
 
-Requires outbound network access to `tld.iot.hamburg.de` and
-`basemaps.cartocdn.com` from wherever it's hosted. On a normal host (Vercel,
-etc.) this reaches both with no further configuration; sandboxes with
-restricted general egress (like the one this was developed in) will show the
-map's "Live signal feed unavailable" state and a blank basemap instead.
+Requires outbound network access to `tld.iot.hamburg.de` from wherever it's
+hosted (this was built and verified against the live feed via a sandboxed
+tool with restricted general egress, which is why the end-to-end request
+couldn't be exercised from inside that build sandbox itself — the query
+shape was validated directly against the live API and mirrors it exactly).
+On a normal host (Vercel, etc.) this reaches Hamburg's feed with no further
+configuration.
 
 ## Map basemap
 
 Uses CARTO's free `dark-matter` vector style (OSM-derived, no key required),
-with labels stripped and roads dimmed further at runtime so the route reads
-clearly against the road network.
+with labels stripped and roads dimmed further at runtime so it reads as a
+cinematic artwork rather than a standard map product.

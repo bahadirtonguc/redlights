@@ -4,9 +4,9 @@ import "./globals.css";
 import { Providers } from "@/store/Providers";
 
 export const metadata: Metadata = {
-  title: "Hamburg — Green Route",
+  title: "RED LIGHTS — Parallel Lives",
   description:
-    "A live map of Hamburg's traffic lights, with a route drawn through the ones currently green.",
+    "A live portrait of Hamburg, told through its red traffic lights.",
 };
 
 export default function RootLayout({ children }: LayoutProps<"/">) {
