@@ -1,12 +1,31 @@
 import { fetchCollection, HAMBURG_TLF_BASE } from "./client";
-import { PRIMARY_SIGNAL_CODES, parseConnectionName, type RawDatastream } from "./types";
-import type { CityAdapter, NormalizedSignal, SignalState, SignalsSnapshot } from "@/lib/model/types";
+import { liveMaxAgeSeconds, normalizeObservation } from "./normalize";
+import type { RawDatastream } from "./types";
+import { memoTtl } from "@/lib/cache/memo";
+import type {
+  CityAdapter,
+  GeometrySnapshot,
+  GeometryTuple,
+  SourceInfo,
+  StateTuple,
+  StatesSnapshot,
+} from "@/lib/model/types";
 
 // Central Hamburg bounding box (Altstadt / St. Pauli / Sternschanze /
 // Speicherstadt / Altona-Ost). The feed itself is citywide (~20,000 primary
-// signal heads); we filter client-side to keep this an intimate portrait of
-// one city core rather than a sprawling infrastructure dashboard.
+// signal heads); we restrict to this box to keep the piece an intimate portrait
+// of one city core rather than a sprawling infrastructure dashboard.
 const BBOX = { west: 9.93, south: 53.53, east: 10.03, north: 53.585 };
+
+const BBOX_WKT =
+  `POLYGON((${BBOX.west} ${BBOX.south},${BBOX.east} ${BBOX.south},` +
+  `${BBOX.east} ${BBOX.north},${BBOX.west} ${BBOX.north},${BBOX.west} ${BBOX.south}))`;
+
+const SOURCE: SourceInfo = {
+  name: "Traffic Lights Data Hamburg (TLF) — Freie und Hansestadt Hamburg",
+  attribution: "Freie und Hansestadt Hamburg, zuständige Behörde",
+  license: "Datenlizenz Deutschland – Namensnennung 2.0",
+};
 
 function inBbox(lon: number, lat: number): boolean {
   return lon >= BBOX.west && lon <= BBOX.east && lat >= BBOX.south && lat <= BBOX.north;
@@ -27,139 +46,122 @@ function firstCoordinate(ds: RawDatastream): [number, number] | null {
   return null;
 }
 
-// --- geometry lookup (id -> location), cached separately from live state ---
+// --- geometry (id -> location): static, cached for hours -------------------
 //
-// Asking Hamburg's feed for $expand=Observations is expensive per row —
-// citywide (~20,000 datastreams) it takes 20s+, which is why the map used to
-// take that long to light up (and effectively polled far slower than the 5s
-// UI interval, since each poll waited out the previous one). But the fetch
-// WITHOUT the expand is cheap regardless of size (well under a second), and
-// signal *locations* don't change — only their live state does. So we fetch
-// the citywide geometry once (cached for an hour), filter to our bbox, and
-// on every live poll ask only for THOSE ids' latest observation — which,
-// filtered by id instead of scanned by property, is also fast.
-interface BboxDatastream {
-  id: number;
-  intersectionId: string;
-  connectionId: string;
-  longitude: number;
-  latitude: number;
-}
-
-let geometryCache: { at: number; datastreams: BboxDatastream[] } | null = null;
-const GEOMETRY_CACHE_MS = 60 * 60 * 1000; // locations are static; refresh hourly as a safety net
+// Signal locations don't change, so this is fetched once and reused: in
+// process memory, and in Next's Data Cache so a freshly booted serverless
+// instance doesn't have to ask Hamburg again. The bbox is applied upstream
+// (st_within), so we pull ~5k rows instead of the citywide ~20k.
+const GEOMETRY_TTL_S = 6 * 60 * 60;
 
 function buildGeometryQueryUrl(): string {
   const params = new URLSearchParams({
-    $filter: `properties/layerName eq 'primary_signal'`,
-    $select: "id,name,observedArea",
-    $top: "10000", // server-enforced max page size; fetchCollection follows nextLink for the rest
+    $filter: `properties/layerName eq 'primary_signal' and st_within(observedArea,geography'${BBOX_WKT}')`,
+    $select: "id,observedArea",
+    $top: "10000", // server-enforced max page size; fetchCollection follows nextLink past it
   });
   return `${HAMBURG_TLF_BASE}/Datastreams?${params.toString()}`;
 }
 
-async function getBboxDatastreams(): Promise<BboxDatastream[]> {
-  const now = Date.now();
-  if (geometryCache && now - geometryCache.at < GEOMETRY_CACHE_MS) {
-    return geometryCache.datastreams;
-  }
+async function loadGeometry(): Promise<GeometrySnapshot> {
+  const raw = await fetchCollection<RawDatastream>(buildGeometryQueryUrl(), {
+    maxPages: 5,
+    revalidateSeconds: GEOMETRY_TTL_S,
+  });
 
-  const raw = await fetchCollection<RawDatastream>(buildGeometryQueryUrl(), 5);
-  const datastreams: BboxDatastream[] = [];
+  const signals: GeometryTuple[] = [];
   for (const ds of raw) {
     const coord = firstCoordinate(ds);
     if (!coord || !inBbox(coord[0], coord[1])) continue;
-    const { intersectionId, connectionId } = parseConnectionName(ds.name);
-    datastreams.push({
-      id: ds["@iot.id"],
-      intersectionId,
-      connectionId,
-      longitude: coord[0],
-      latitude: coord[1],
-    });
+    // 6 decimals ≈ 0.1 m — plenty, and keeps the payload small.
+    signals.push([ds["@iot.id"], round6(coord[0]), round6(coord[1])]);
   }
 
-  geometryCache = { at: now, datastreams };
-  return datastreams;
+  return { city: "hamburg", generatedAt: new Date().toISOString(), source: SOURCE, signals };
 }
 
-// --- live state lookup, filtered by the exact ids we care about ---
+function round6(n: number): number {
+  return Math.round(n * 1e6) / 1e6;
+}
 
-// Kept well under Hamburg's ~8KB request-header limit — a batch of 1000 ids
-// (a plain "id eq X or ..." filter) trips it; this leaves comfortable margin.
-const STATE_BATCH_SIZE = 200;
+const getGeometryCached = memoTtl(GEOMETRY_TTL_S * 1000, loadGeometry);
 
-function buildStateQueryUrl(ids: number[]): string {
-  const filter = ids.map((id) => `id eq ${id}`).join(" or ");
+// --- live state, filtered upstream ------------------------------------------
+//
+// One query per batch of ids, expanding only each datastream's newest
+// observation. Two things make this fast (≈1 s for ~5k signals, vs ≈3.5 s
+// before):
+//   * The expanded observations are filtered to `resultTime gt <cut-off>`, so
+//     the feed never scans a signal's full history and offline signals come back
+//     empty instead of costing a sort.
+//   * Ordering is by resultTime, not phenomenonTime. The feed contains
+//     observations whose phenomenonTime is hours in the FUTURE (a timezone bug
+//     on its side); sorting by phenomenonTime pins that stale record as "latest"
+//     and hides the signal's real current state.
+// `id in (...)` keeps the URL short; ~500 ids stays well under Hamburg's
+// ~8 KB request limit (1000 is rejected with 400).
+const STATE_BATCH_SIZE = 500;
+const STATES_TTL_MS = 2000; // bursts of requests within this window share one upstream round
+
+function buildStateQueryUrl(ids: number[], sinceIso: string): string {
   const params = new URLSearchParams({
-    $filter: filter,
-    $expand: "Observations($top=1;$orderby=phenomenonTime desc)",
-    $select: "id,Observations",
+    $filter: `id in (${ids.join(",")})`,
+    $expand:
+      `Observations($select=result,phenomenonTime;$top=1;` +
+      `$orderby=resultTime desc;$filter=resultTime gt ${sinceIso})`,
+    $select: "id",
     $top: String(ids.length),
   });
   return `${HAMBURG_TLF_BASE}/Datastreams?${params.toString()}`;
 }
 
-async function fetchLatestStates(ids: number[]): Promise<Map<number, RawDatastream>> {
+async function loadStates(): Promise<StatesSnapshot> {
+  const geometry = await getGeometryCached();
+  const ids = geometry.signals.map((g) => g[0]);
+
+  const maxAgeSeconds = liveMaxAgeSeconds();
+  const nowMs = Date.now();
+  const sinceIso = new Date(nowMs - maxAgeSeconds * 1000).toISOString();
+
   const batches: number[][] = [];
   for (let i = 0; i < ids.length; i += STATE_BATCH_SIZE) {
     batches.push(ids.slice(i, i + STATE_BATCH_SIZE));
   }
-
   const results = await Promise.all(
-    batches.map((batch) => fetchCollection<RawDatastream>(buildStateQueryUrl(batch), 2)),
+    batches.map((batch) =>
+      fetchCollection<RawDatastream>(buildStateQueryUrl(batch, sinceIso), { maxPages: 2 }),
+    ),
   );
 
-  const byId = new Map<number, RawDatastream>();
+  const signals: StateTuple[] = [];
+  const excluded = { offline: 0, other: 0 };
+  const seen = new Set<number>();
+
   for (const ds of results.flat()) {
-    byId.set(ds["@iot.id"], ds);
+    const id = ds["@iot.id"];
+    seen.add(id);
+    const n = normalizeObservation(ds.Observations?.[0], nowMs, maxAgeSeconds * 1000);
+    if (n.kind === "live") signals.push([id, n.state, n.updatedAt]);
+    else excluded[n.kind] += 1;
   }
-  return byId;
-}
+  // Ids the feed didn't return at all count as offline too.
+  excluded.offline += ids.length - seen.size;
 
-function classifyState(result: number | undefined): SignalState {
-  if (result === PRIMARY_SIGNAL_CODES.RED || result === PRIMARY_SIGNAL_CODES.RED_AMBER) {
-    return "red";
-  }
-  if (result === PRIMARY_SIGNAL_CODES.GREEN || result === PRIMARY_SIGNAL_CODES.GREEN_FLASHING) {
-    return "green";
-  }
-  // dark / amber / amber-flashing / unknown / missing — never a confirmed
-  // red, so it never glows. Treated like green (hidden).
-  return "other";
-}
-
-function toNormalized(geo: BboxDatastream, ds: RawDatastream | undefined): NormalizedSignal {
-  const obs = ds?.Observations?.[0];
   return {
     city: "hamburg",
-    intersectionId: geo.intersectionId,
-    signalId: `${geo.intersectionId}_${geo.connectionId}_${geo.id}`,
-    longitude: geo.longitude,
-    latitude: geo.latitude,
-    state: classifyState(obs?.result),
-    lastUpdated: obs?.phenomenonTime ?? new Date(0).toISOString(),
+    generatedAt: new Date(nowMs).toISOString(),
+    maxAgeSeconds,
+    total: ids.length,
+    live: signals.length,
+    excluded,
+    signals,
   };
 }
 
+const getStatesCached = memoTtl(STATES_TTL_MS, loadStates);
+
 export const hamburgAdapter: CityAdapter = {
   city: "hamburg",
-
-  async getSnapshot(): Promise<SignalsSnapshot> {
-    const bboxDatastreams = await getBboxDatastreams();
-    const states = await fetchLatestStates(bboxDatastreams.map((d) => d.id));
-
-    const signals = bboxDatastreams.map((geo) => toNormalized(geo, states.get(geo.id)));
-
-    return {
-      city: "hamburg",
-      generatedAt: new Date().toISOString(),
-      source: {
-        name: "Traffic Lights Data Hamburg (TLF) — Freie und Hansestadt Hamburg",
-        attribution: "Freie und Hansestadt Hamburg, zuständige Behörde",
-        license: "Datenlizenz Deutschland – Namensnennung 2.0",
-      },
-      signals,
-    };
-  },
+  getGeometry: getGeometryCached,
+  getStates: getStatesCached,
 };

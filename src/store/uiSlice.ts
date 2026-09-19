@@ -4,7 +4,7 @@ export type ViewMode = "overview" | "focused";
 
 interface UiState {
   mode: ViewMode;
-  selectedSignalId: string | null;
+  selectedSignalId: number | null;
   aboutOpen: boolean;
 }
 
@@ -18,7 +18,7 @@ const uiSlice = createSlice({
   name: "ui",
   initialState,
   reducers: {
-    selectSignal(state, action: PayloadAction<string>) {
+    selectSignal(state, action: PayloadAction<number>) {
       state.selectedSignalId = action.payload;
       state.mode = "focused";
     },

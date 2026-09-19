@@ -12,6 +12,14 @@ export interface STCollection<T> {
   "@iot.nextLink"?: string;
 }
 
+export interface FetchOptions {
+  // Follow @iot.nextLink pagination up to this many pages.
+  maxPages?: number;
+  // Persist the response in Next's server-side Data Cache for this many
+  // seconds (shared across serverless instances). Omit for a live, uncached call.
+  revalidateSeconds?: number;
+}
+
 /**
  * Fetch a SensorThings collection, following @iot.nextLink pagination up to
  * maxPages. Hamburg's mesh has thousands of lane-connection "Things", so
@@ -20,7 +28,7 @@ export interface STCollection<T> {
  */
 export async function fetchCollection<T>(
   url: string,
-  maxPages = 20,
+  { maxPages = 20, revalidateSeconds }: FetchOptions = {},
 ): Promise<T[]> {
   const out: T[] = [];
   let next: string | undefined = url;
@@ -31,7 +39,9 @@ export async function fetchCollection<T>(
       headers: { Accept: "application/json" },
       // Server-side only; this feed has no documented CORS support, which is
       // exactly why this call must happen behind our own API route.
-      cache: "no-store",
+      ...(revalidateSeconds
+        ? { cache: "force-cache" as const, next: { revalidate: revalidateSeconds } }
+        : { cache: "no-store" as const }),
     });
     if (!res.ok) {
       throw new Error(
